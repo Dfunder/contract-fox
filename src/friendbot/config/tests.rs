@@ -1,5 +1,5 @@
-use super::*;
 use super::test_helpers::{with_network, without_network};
+use super::*;
 
 #[test]
 fn testnet_has_correct_passphrase() {

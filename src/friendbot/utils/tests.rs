@@ -1,7 +1,7 @@
-use crate::friendbot::config::NetworkConfig;
-use crate::friendbot::config::test_helpers::with_network;
 use super::friendbot::fund_account;
 use super::types::StellarError;
+use crate::friendbot::config::NetworkConfig;
+use crate::friendbot::config::test_helpers::with_network;
 
 // ── Mainnet guard ─────────────────────────────────────────────────────────────
 

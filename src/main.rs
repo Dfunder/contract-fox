@@ -1,4 +1,4 @@
-mod setup;
 pub mod friendbot;
+mod setup;
 
 fn main() {}

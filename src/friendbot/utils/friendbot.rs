@@ -1,5 +1,5 @@
-use crate::friendbot::config::NetworkConfig;
 use super::types::StellarError;
+use crate::friendbot::config::NetworkConfig;
 
 /// Fund a Stellar account using Friendbot.
 ///
