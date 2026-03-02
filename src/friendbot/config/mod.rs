@@ -37,8 +37,10 @@ pub struct NetworkConfig {
     /// Stellar network passphrase used when signing transactions.
     pub network_passphrase: &'static str,
     /// Horizon REST API base URL.
+    #[allow(dead_code)]
     pub horizon_url: &'static str,
     /// Soroban JSON-RPC base URL.
+    #[allow(dead_code)]
     pub soroban_rpc_url: &'static str,
     /// Friendbot funding URL (`None` on Mainnet).
     pub friendbot_url: Option<&'static str>,
@@ -83,6 +85,7 @@ impl NetworkConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub fn log_startup(&self) {
         println!("[stellar-aid] Active network : {}", self.name);
         println!("[stellar-aid]   horizon_url     = {}", self.horizon_url);
@@ -99,47 +102,7 @@ impl NetworkConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod test_helpers;
 
-    #[test]
-    fn testnet_has_correct_passphrase() {
-        let cfg = NetworkConfig::testnet();
-        assert_eq!(cfg.network_passphrase, "Test SDF Network ; September 2015");
-    }
-
-    #[test]
-    fn mainnet_has_no_friendbot() {
-        let cfg = NetworkConfig::mainnet();
-        assert!(!cfg.has_friendbot());
-    }
-
-    #[test]
-    fn testnet_and_futurenet_have_friendbot() {
-        assert!(NetworkConfig::testnet().has_friendbot());
-        assert!(NetworkConfig::futurenet().has_friendbot());
-    }
-
-    #[test]
-    fn from_env_defaults_to_testnet() {
-        unsafe { env::remove_var("STELLAR_NETWORK") };
-        let cfg = NetworkConfig::from_env();
-        assert_eq!(cfg.name, "Testnet");
-    }
-
-    #[test]
-    fn from_env_picks_mainnet() {
-        unsafe { env::set_var("STELLAR_NETWORK", "mainnet") };
-        let cfg = NetworkConfig::from_env();
-        assert_eq!(cfg.name, "Mainnet");
-        unsafe { env::remove_var("STELLAR_NETWORK") };
-    }
-
-    #[test]
-    fn from_env_picks_futurenet_case_insensitive() {
-        unsafe { env::set_var("STELLAR_NETWORK", "FUTURENET") };
-        let cfg = NetworkConfig::from_env();
-        assert_eq!(cfg.name, "Futurenet");
-        unsafe { env::remove_var("STELLAR_NETWORK") };
-    }
-}
+#[cfg(test)]
+mod tests;
