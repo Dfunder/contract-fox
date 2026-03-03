@@ -32,7 +32,7 @@ mod test {
     #[test]
     fn test_ping() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, DonationContract);
+        let contract_id = env.register(DonationContract, ());
         let client = DonationContractClient::new(&env, &contract_id);
 
         assert_eq!(client.ping(), 1);
