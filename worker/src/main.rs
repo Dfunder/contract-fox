@@ -20,7 +20,7 @@ impl Default for WorkerConfig {
 
 pub async fn run_worker(config: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting worker with config: {:?}", config);
-    
+
     loop {
         println!("Polling for contract updates...");
         tokio::time::sleep(tokio::time::Duration::from_secs(config.poll_interval)).await;
