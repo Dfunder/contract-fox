@@ -5,7 +5,7 @@
 //! a secret key.
 
 use ed25519_dalek::SigningKey;
-use stellar_strkey::{ed25519, Strkey};
+use stellar_strkey::{Strkey, ed25519};
 use thiserror::Error;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -25,11 +25,15 @@ pub enum KeyError {
 // ── Validation helpers ────────────────────────────────────────────────────────
 
 /// Returns `true` if `key` is a valid Stellar public (account) key.
+///
+/// A valid Stellar public key starts with `G` and is 56 characters long.
 pub fn is_valid_public_key(key: &str) -> bool {
     matches!(Strkey::from_string(key), Ok(Strkey::PublicKeyEd25519(_)))
 }
 
 /// Returns `true` if `key` is a valid Stellar secret (seed) key.
+///
+/// A valid Stellar secret key starts with `S` and is 56 characters long.
 pub fn is_valid_secret_key(key: &str) -> bool {
     matches!(Strkey::from_string(key), Ok(Strkey::PrivateKeyEd25519(_)))
 }
@@ -37,6 +41,9 @@ pub fn is_valid_secret_key(key: &str) -> bool {
 // ── Derivation helper ─────────────────────────────────────────────────────────
 
 /// Derives the Stellar public key (account ID) from a secret key string.
+///
+/// Returns the public key as a StrKey-encoded `String` (starts with `G`),
+/// or a [`KeyError`] if the supplied secret key is invalid.
 pub fn public_key_from_secret(secret: &str) -> Result<String, KeyError> {
     let seed = match Strkey::from_string(secret) {
         Ok(Strkey::PrivateKeyEd25519(s)) => s,
@@ -50,31 +57,45 @@ pub fn public_key_from_secret(secret: &str) -> Result<String, KeyError> {
     Ok(Strkey::PublicKeyEd25519(public).to_string())
 }
 
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+/// Generate a valid (secret, public) key pair string from a deterministic seed.
+/// Only used in tests — the seed bytes are arbitrary but fixed.
+#[cfg(test)]
+fn make_keypair(seed_byte: u8) -> (String, String) {
+    let seed_bytes = [seed_byte; 32];
+    let signing_key = SigningKey::from_bytes(&seed_bytes);
+    let verifying_key = signing_key.verifying_key();
+
+    let secret = Strkey::PrivateKeyEd25519(ed25519::PrivateKey(seed_bytes)).to_string();
+    let public = Strkey::PublicKeyEd25519(ed25519::PublicKey(verifying_key.to_bytes())).to_string();
+    (secret, public)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const VALID_PUBLIC_KEY: &str = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-    const VALID_SECRET_KEY: &str = "SCZANGBA5YELQQHRKQM5AOPXJH3BZXCUAC3I7JUGWSCSM7YIZMMBZNE";
-
-    const VALID_SECRET_KEY_2: &str = "SBQWY3DNBE3OYYQ24X5LLPFBKR6HZPFSNHNHZE5ONXYLZGDMMJD7GSG";
-    const VALID_PUBLIC_KEY_2: &str = "GDUTHCF37UX32EMANXIL2WOOVEDAALEER57DMDA4EFTLHVZ5GSREJUOG";
+    // ── is_valid_public_key ───────────────────────────────────────────────────
 
     #[test]
     fn valid_public_key_returns_true() {
-        assert!(is_valid_public_key(VALID_PUBLIC_KEY));
+        let (_, public) = make_keypair(1);
+        assert!(is_valid_public_key(&public));
     }
 
     #[test]
     fn second_valid_public_key_returns_true() {
-        assert!(is_valid_public_key(VALID_PUBLIC_KEY_2));
+        let (_, public) = make_keypair(2);
+        assert!(is_valid_public_key(&public));
     }
 
     #[test]
     fn secret_key_is_not_a_valid_public_key() {
-        assert!(!is_valid_public_key(VALID_SECRET_KEY));
+        let (secret, _) = make_keypair(1);
+        assert!(!is_valid_public_key(&secret));
     }
 
     #[test]
@@ -89,29 +110,36 @@ mod tests {
 
     #[test]
     fn truncated_public_key_is_invalid() {
-        let truncated = &VALID_PUBLIC_KEY[..VALID_PUBLIC_KEY.len() - 1];
+        let (_, public) = make_keypair(1);
+        let truncated = &public[..public.len() - 1];
         assert!(!is_valid_public_key(truncated));
     }
 
     #[test]
     fn public_key_with_wrong_prefix_is_invalid() {
-        let mangled = format!("X{}", &VALID_PUBLIC_KEY[1..]);
+        let (_, public) = make_keypair(1);
+        let mangled = format!("X{}", &public[1..]);
         assert!(!is_valid_public_key(&mangled));
     }
 
+    // ── is_valid_secret_key ───────────────────────────────────────────────────
+
     #[test]
     fn valid_secret_key_returns_true() {
-        assert!(is_valid_secret_key(VALID_SECRET_KEY));
+        let (secret, _) = make_keypair(1);
+        assert!(is_valid_secret_key(&secret));
     }
 
     #[test]
     fn second_valid_secret_key_returns_true() {
-        assert!(is_valid_secret_key(VALID_SECRET_KEY_2));
+        let (secret, _) = make_keypair(2);
+        assert!(is_valid_secret_key(&secret));
     }
 
     #[test]
     fn public_key_is_not_a_valid_secret_key() {
-        assert!(!is_valid_secret_key(VALID_PUBLIC_KEY));
+        let (_, public) = make_keypair(1);
+        assert!(!is_valid_secret_key(&public));
     }
 
     #[test]
@@ -126,25 +154,31 @@ mod tests {
 
     #[test]
     fn truncated_secret_key_is_invalid() {
-        let truncated = &VALID_SECRET_KEY[..VALID_SECRET_KEY.len() - 1];
+        let (secret, _) = make_keypair(1);
+        let truncated = &secret[..secret.len() - 1];
         assert!(!is_valid_secret_key(truncated));
     }
 
     #[test]
     fn secret_key_with_wrong_prefix_is_invalid() {
-        let mangled = format!("T{}", &VALID_SECRET_KEY[1..]);
+        let (secret, _) = make_keypair(1);
+        let mangled = format!("T{}", &secret[1..]);
         assert!(!is_valid_secret_key(&mangled));
     }
 
+    // ── public_key_from_secret ────────────────────────────────────────────────
+
     #[test]
     fn derives_correct_public_key_from_secret() {
-        let public = public_key_from_secret(VALID_SECRET_KEY_2).unwrap();
-        assert_eq!(public, VALID_PUBLIC_KEY_2);
+        let (secret, expected_public) = make_keypair(42);
+        let derived = public_key_from_secret(&secret).unwrap();
+        assert_eq!(derived, expected_public);
     }
 
     #[test]
     fn derived_public_key_starts_with_g_and_is_56_chars() {
-        let public = public_key_from_secret(VALID_SECRET_KEY).unwrap();
+        let (secret, _) = make_keypair(1);
+        let public = public_key_from_secret(&secret).unwrap();
         assert!(public.starts_with('G'));
         assert_eq!(public.len(), 56);
     }
@@ -157,7 +191,8 @@ mod tests {
 
     #[test]
     fn public_key_from_public_key_returns_err() {
-        let err = public_key_from_secret(VALID_PUBLIC_KEY).unwrap_err();
+        let (_, public) = make_keypair(1);
+        let err = public_key_from_secret(&public).unwrap_err();
         assert!(matches!(err, KeyError::InvalidSecretKey(_)));
     }
 
