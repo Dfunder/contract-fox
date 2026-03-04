@@ -1,5 +1,4 @@
-mod config;
+pub mod friendbot;
 mod setup;
-mod utils;
 
 fn main() {}
