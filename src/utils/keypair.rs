@@ -48,11 +48,9 @@ pub enum KeyError {
 /// assert!(!is_valid_public_key(""));
 /// ```
 pub fn is_valid_public_key(key: &str) -> bool {
-    matches!(
-        Strkey::from_string(key),
-        Ok(Strkey::PublicKeyEd25519(_))
-    )
+    matches!(Strkey::from_string(key), Ok(Strkey::PublicKeyEd25519(_)))
 }
+
 
 /// Returns `true` if `key` is a valid Stellar secret (seed) key.
 ///
