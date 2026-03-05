@@ -71,7 +71,9 @@ pub fn fund_account(public_key: &str) -> Result<(), StellarError> {
         return Err(StellarError::FriendbotError { status: 400, body });
     }
 
-    let body = response.text().unwrap_or_default();
+    let body = response
+        .text()
+        .map_err(|e: reqwest::Error| StellarError::HttpRequestFailed(e.to_string()))?;
     Err(StellarError::FriendbotError {
         status: status.as_u16(),
         body,

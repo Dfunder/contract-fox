@@ -18,8 +18,11 @@ impl WithdrawalContract {
     /// Withdraw funds from the contract
     pub fn withdraw(env: Env, amount: i128) -> bool {
         let key = Symbol::new(&env, "settings");
-        let (beneficiary, max_withdrawal): (Address, i128) =
-            env.storage().instance().get(&key).unwrap();
+        let (beneficiary, max_withdrawal): (Address, i128) = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("withdrawal not initialized");
 
         beneficiary.require_auth();
 

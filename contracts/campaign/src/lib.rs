@@ -18,14 +18,20 @@ impl CampaignContract {
     /// Get campaign status
     pub fn get_status(env: Env) -> (Symbol, Symbol, i128, u64) {
         let key = Symbol::new(&env, "campaign_data");
-        env.storage().instance().get(&key).unwrap()
+        env.storage()
+            .instance()
+            .get(&key)
+            .expect("campaign not initialized")
     }
 
     /// Check if campaign is active
     pub fn is_active(env: Env) -> bool {
         let key = Symbol::new(&env, "campaign_data");
-        let (_id, _title, _target, deadline): (Symbol, Symbol, i128, u64) =
-            env.storage().instance().get(&key).unwrap();
+        let (_id, _title, _target, deadline): (Symbol, Symbol, i128, u64) = env
+            .storage()
+            .instance()
+            .get(&key)
+            .expect("campaign not initialized");
 
         let current_time = env.ledger().timestamp();
         current_time < deadline
