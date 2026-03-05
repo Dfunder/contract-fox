@@ -104,8 +104,7 @@ mod tests {
 
     #[test]
     fn stellar_http_failure_converts_to_network() {
-        let err: StellarAidError =
-            StellarError::HttpRequestFailed("timeout".into()).into();
+        let err: StellarAidError = StellarError::HttpRequestFailed("timeout".into()).into();
         assert!(matches!(err, StellarAidError::NetworkError(_)));
     }
 
@@ -132,10 +131,7 @@ mod tests {
     #[test]
     fn display_includes_variant_prefix() {
         let err = StellarAidError::ValidationError("amount must be positive".into());
-        assert_eq!(
-            err.to_string(),
-            "Validation error: amount must be positive"
-        );
+        assert_eq!(err.to_string(), "Validation error: amount must be positive");
     }
 
     #[test]
