@@ -1,3 +1,16 @@
+[workspace]
+members = [
+    "contracts/donation",
+    "contracts/withdrawal",
+    "contracts/campaign",
+    "sdk",
+    "worker",
+]
+
+[workspace.profile.release]
+opt-level = "z"
+lto = true
+
 [package]
 name = "contract-fox"
 version = "0.1.0"
