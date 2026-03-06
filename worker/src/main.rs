@@ -1,5 +1,8 @@
 // Contract Fox Worker - Background service for contract management
+mod logging;
+
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn, error, debug, instrument};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -18,18 +21,45 @@ impl Default for WorkerConfig {
     }
 }
 
+#[instrument(skip(config), fields(rpc_url = %config.rpc_url, network = %config.network, poll_interval = config.poll_interval))]
 pub async fn run_worker(config: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting worker with config: {:?}", config);
+    info!("Starting contract fox worker");
 
     loop {
-        println!("Polling for contract updates...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(config.poll_interval)).await;
+        debug!("Polling for contract updates");
+        
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(config.poll_interval),
+            check_contracts(&config)
+        ).await {
+            Ok(result) => {
+                if let Err(e) = result {
+                    error!("Error checking contracts: {}", e);
+                }
+            }
+            Err(_) => {
+                debug!("Polling timeout reached, continuing to next iteration");
+            }
+        }
     }
+}
+
+#[instrument(skip(config))]
+async fn check_contracts(config: &WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("Checking contracts on network: {}", config.network);
+    
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    logging::init_logging()?;
+    
     let config = WorkerConfig::default();
+    info!("Worker initialized with default configuration");
+    
     run_worker(config).await
 }
 
