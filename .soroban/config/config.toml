@@ -1,0 +1,14 @@
+# Soroban CLI network configuration for Contract Fox
+# These entries allow `soroban` to resolve the testnet and mainnet
+# networks without requiring every developer to add them manually.
+
+# The `network_passphrase` field must exactly match the Stellar network
+# passphrase used by the RPC node you are targeting.
+
+[networks.testnet]
+rpc_url = "https://rpc.testnet.soroban.stellar.org"
+network_passphrase = "Test SDF Network ; September 2015"
+
+[networks.mainnet]
+rpc_url = "https://rpc.mainnet.soroban.stellar.org"
+network_passphrase = "Public Global Stellar Network ; September 2015"
