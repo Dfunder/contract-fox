@@ -1,5 +1,6 @@
 // Contract Fox Worker - Background service for contract management
 mod logging;
+mod redaction;
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error, debug, instrument};
@@ -9,6 +10,16 @@ pub struct WorkerConfig {
     pub rpc_url: String,
     pub poll_interval: u64,
     pub network: String,
+}
+
+impl WorkerConfig {
+    pub fn log_safe(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rpc_url": self.rpc_url,
+            "poll_interval": self.poll_interval,
+            "network": self.network
+        })
+    }
 }
 
 impl Default for WorkerConfig {
@@ -21,9 +32,9 @@ impl Default for WorkerConfig {
     }
 }
 
-#[instrument(skip(config), fields(rpc_url = %config.rpc_url, network = %config.network, poll_interval = config.poll_interval))]
 pub async fn run_worker(config: WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting contract fox worker");
+    debug!("Worker configuration: {}", serde_json::to_string_pretty(&config.log_safe()).unwrap_or_else(|_| "Failed to serialize config".to_string()));
 
     loop {
         debug!("Polling for contract updates");
@@ -44,7 +55,6 @@ pub async fn run_worker(config: WorkerConfig) -> Result<(), Box<dyn std::error::
     }
 }
 
-#[instrument(skip(config))]
 async fn check_contracts(config: &WorkerConfig) -> Result<(), Box<dyn std::error::Error>> {
     debug!("Checking contracts on network: {}", config.network);
     
