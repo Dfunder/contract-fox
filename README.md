@@ -148,6 +148,10 @@ cargo test --workspace
 
 ### CLI Usage
 
+For a dedicated guide on building, configuring networks, and running a
+simple shell-based deployer, see [docs/DEPLOY.md](docs/DEPLOY.md).
+
+
 ```bash
 # Check configuration
 cargo run -p stellaraid-tools -- config check
