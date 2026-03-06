@@ -16,8 +16,8 @@ pub const CAMPAIGN_STATUS_EXPIRED: u32 = 3;
 pub type Campaign = (u64, Address, i128, u64, u32, u64);
 
 // Events - use simple tuples for compatibility
-pub type CampaignRegisteredEvent = (u64, Address, i128, u64); 
-pub type CampaignStatusUpdatedEvent = (u64, u32, u32); 
+pub type CampaignRegisteredEvent = (u64, Address, i128, u64); // (campaign_id, owner, goal, deadline)
+pub type CampaignStatusUpdatedEvent = (u64, u32, u32); // (campaign_id, old_status, new_status)
 
 #[contract]
 pub struct CampaignContract;
