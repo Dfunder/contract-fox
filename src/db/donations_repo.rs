@@ -1,4 +1,5 @@
-use rusqlite::{params, Connection};
+use crate::models::DonationStatus;
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,7 +18,7 @@ pub struct NewDonation {
     pub memo: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Donation {
     pub id: i64,
     pub tx_hash: String,
@@ -91,6 +92,43 @@ impl DonationsRepo {
         )?;
 
         Ok(record)
+    }
+
+    pub fn get_donation_by_tx_hash(&self, tx_hash: &str) -> Result<Option<Donation>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tx_hash, campaign_id, donor_address, amount, status, created_at
+             FROM donations WHERE tx_hash = ?1",
+        )?;
+
+        let donation = stmt
+            .query_row(params![tx_hash], |row| {
+                Ok(Donation {
+                    id: row.get(0)?,
+                    tx_hash: row.get(1)?,
+                    campaign_id: row.get(2)?,
+                    donor_address: row.get(3)?,
+                    amount: row.get(4)?,
+                    status: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .optional()?;
+
+        Ok(donation)
+    }
+
+    pub fn update_status_if_current(
+        &self,
+        tx_hash: &str,
+        current_status: DonationStatus,
+        new_status: DonationStatus,
+    ) -> Result<bool, DbError> {
+        let rows_updated = self.conn.execute(
+            "UPDATE donations SET status = ?1 WHERE tx_hash = ?2 AND status = ?3",
+            params![new_status.as_str(), tx_hash, current_status.as_str()],
+        )?;
+
+        Ok(rows_updated == 1)
     }
 }
 

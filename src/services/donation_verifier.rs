@@ -4,8 +4,11 @@
 //! it represents a valid `donate` invocation on the expected campaign with the
 //! expected amount.
 
+use async_trait::async_trait;
+use crate::db::donations_repo::DbError;
 use crate::errors::StellarAidError;
-use crate::horizon::client::HorizonClient;
+use crate::horizon::client::{HorizonClient, HorizonError, TransactionDetail};
+use crate::models::DonationStatus;
 
 /// Result of a transaction verification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +25,107 @@ pub enum VerificationResult {
 /// # Errors
 /// Returns [`StellarAidError`] if the Horizon request fails or the response
 /// cannot be parsed.
+#[async_trait]
+pub trait TransactionFetcher {
+    async fn get_transaction(&self, hash: &str) -> Result<TransactionDetail, HorizonError>;
+}
+
+#[async_trait]
+impl TransactionFetcher for HorizonClient {
+    async fn get_transaction(&self, hash: &str) -> Result<TransactionDetail, HorizonError> {
+        HorizonClient::get_transaction(self, hash).await
+    }
+}
+
+pub trait DonationStatusUpdater {
+    fn update_status_if_current(
+        &self,
+        tx_hash: &str,
+        current_status: DonationStatus,
+        new_status: DonationStatus,
+    ) -> Result<bool, DbError>;
+}
+
+impl DonationStatusUpdater for crate::db::donations_repo::DonationsRepo {
+    fn update_status_if_current(
+        &self,
+        tx_hash: &str,
+        current_status: DonationStatus,
+        new_status: DonationStatus,
+    ) -> Result<bool, DbError> {
+        self.update_status_if_current(tx_hash, current_status, new_status)
+    }
+}
+
+pub async fn verify_and_confirm_donation_tx<Fetcher, Repo>(
+    fetcher: &Fetcher,
+    repo: &Repo,
+    tx_hash: &str,
+    campaign_id: u64,
+    expected_amount: i128,
+) -> Result<VerificationResult, StellarAidError>
+where
+    Fetcher: TransactionFetcher + Sync,
+    Repo: DonationStatusUpdater + Sync,
+{
+    if tx_hash.trim().is_empty() {
+        return Ok(VerificationResult::Invalid(
+            "tx_hash must not be empty".to_string(),
+        ));
+    }
+
+    let tx = fetcher
+        .get_transaction(tx_hash)
+        .await
+        .map_err(|err| match err {
+            HorizonError::NotFound => StellarAidError::TransactionFailed("transaction not found".into()),
+            HorizonError::RateLimited(reason) => StellarAidError::NetworkError(reason),
+            HorizonError::Timeout(reason) => StellarAidError::NetworkError(reason),
+            HorizonError::Reqwest(reason) => StellarAidError::NetworkError(reason),
+            HorizonError::Json(reason) => StellarAidError::HorizonError(reason.to_string()),
+            HorizonError::Http(code, body) => {
+                StellarAidError::HorizonError(format!("Horizon returned {}: {}", code, body))
+            }
+            HorizonError::Other(reason) => StellarAidError::NetworkError(reason),
+        })?;
+
+    let verification = verify_transaction_details(&tx, campaign_id, expected_amount);
+    if let Err(reason) = &verification {
+        let _ = repo.update_status_if_current(
+            tx_hash,
+            DonationStatus::Submitted,
+            DonationStatus::Failed,
+        );
+        let _ = repo.update_status_if_current(
+            tx_hash,
+            DonationStatus::Confirming,
+            DonationStatus::Failed,
+        );
+        return Ok(VerificationResult::Invalid(reason.clone()));
+    }
+
+    // Verification succeeded; only update to confirmed after a successful Horizon check.
+    let _ = repo.update_status_if_current(
+        tx_hash,
+        DonationStatus::Submitted,
+        DonationStatus::Confirming,
+    )?;
+
+    let confirmed = repo.update_status_if_current(
+        tx_hash,
+        DonationStatus::Confirming,
+        DonationStatus::Confirmed,
+    )?;
+
+    if !confirmed {
+        return Err(StellarAidError::ValidationError(
+            "failed to transition donation to confirmed".into(),
+        ));
+    }
+
+    Ok(VerificationResult::Valid)
+}
+
 pub async fn verify_donation_tx(
     client: &HorizonClient,
     tx_hash: &str,
@@ -39,43 +143,68 @@ pub async fn verify_donation_tx(
         .await
         .map_err(|e| StellarAidError::HorizonError(e.to_string()))?;
 
-    // Extract the envelope XDR from the extra fields returned by Horizon.
-    let envelope_xdr = tx
-        .extra
-        .get("envelope_xdr")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    match verify_transaction_details(&tx, campaign_id, expected_amount) {
+        Ok(()) => Ok(VerificationResult::Valid),
+        Err(reason) => Ok(VerificationResult::Invalid(reason)),
+    }
+}
 
-    // Parse the invocation arguments encoded in the envelope XDR.
-    // In a production implementation this would decode the XDR binary with
-    // stellar-xdr; here we validate the fields that Horizon exposes directly.
-    let parsed = parse_soroban_invocation(envelope_xdr, &tx.extra);
+fn verify_transaction_details(
+    tx: &TransactionDetail,
+    campaign_id: u64,
+    expected_amount: i128,
+) -> Result<(), String> {
+    if tx.result_code.as_deref() != Some("txSUCCESS") {
+        return Err(format!(
+            "transaction result code is not txSUCCESS: {:?}",
+            tx.result_code
+        ));
+    }
 
-    match parsed {
+    if tx.ledger.is_none() {
+        return Err("transaction ledger is missing".to_string());
+    }
+
+    let created_at = tx
+        .created_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if created_at.is_none() {
+        return Err("transaction created_at is missing".to_string());
+    }
+
+    let invocation = parse_soroban_invocation(
+        tx.extra
+            .get("envelope_xdr")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        &tx.extra,
+    );
+
+    match invocation {
         Some(inv) => {
             if inv.function_name != "donate" {
-                return Ok(VerificationResult::Invalid(format!(
+                return Err(format!(
                     "expected function `donate`, found `{}`",
                     inv.function_name
-                )));
+                ));
             }
             if inv.campaign_id != campaign_id {
-                return Ok(VerificationResult::Invalid(format!(
+                return Err(format!(
                     "expected campaign_id {}, found {}",
                     campaign_id, inv.campaign_id
-                )));
+                ));
             }
             if inv.amount != expected_amount {
-                return Ok(VerificationResult::Invalid(format!(
+                return Err(format!(
                     "expected amount {}, found {}",
                     expected_amount, inv.amount
-                )));
+                ));
             }
-            Ok(VerificationResult::Valid)
+            Ok(())
         }
-        None => Ok(VerificationResult::Invalid(
-            "could not parse Soroban invocation from transaction envelope".to_string(),
-        )),
+        None => Err("could not parse Soroban invocation from transaction envelope".to_string()),
     }
 }
 
@@ -178,5 +307,121 @@ mod tests {
     fn no_invocation_field_returns_none() {
         let extra = serde_json::json!({ "envelope_xdr": "abc" });
         assert!(parse_soroban_invocation("", &extra).is_none());
+    }
+
+    struct MockFetcher {
+        response: Result<TransactionDetail, HorizonError>,
+    }
+
+    #[async_trait]
+    impl TransactionFetcher for MockFetcher {
+        async fn get_transaction(&self, _hash: &str) -> Result<TransactionDetail, HorizonError> {
+            self.response.clone()
+        }
+    }
+
+    struct MockRepo {
+        updates: std::sync::Mutex<Vec<(String, DonationStatus, DonationStatus)>>,
+    }
+
+    impl MockRepo {
+        fn new() -> Self {
+            Self {
+                updates: std::sync::Mutex::new(vec![]),
+            }
+        }
+    }
+
+    impl DonationStatusUpdater for MockRepo {
+        fn update_status_if_current(
+            &self,
+            tx_hash: &str,
+            current_status: DonationStatus,
+            new_status: DonationStatus,
+        ) -> Result<bool, DbError> {
+            self.updates
+                .lock()
+                .unwrap()
+                .push((tx_hash.to_string(), current_status, new_status));
+            Ok(true)
+        }
+    }
+
+    fn make_transaction_detail(
+        hash: &str,
+        result_code: Option<&str>,
+        ledger: Option<u64>,
+        created_at: Option<&str>,
+    ) -> TransactionDetail {
+        TransactionDetail {
+            id: "1".to_string(),
+            hash: hash.to_string(),
+            ledger,
+            created_at: created_at.map(|s| s.to_string()),
+            result_code: result_code.map(|s| s.to_string()),
+            extra: serde_json::json!({
+                "_parsed_invocation": {
+                    "function_name": "donate",
+                    "campaign_id": 1,
+                    "amount": 500
+                },
+                "envelope_xdr": ""
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_and_confirm_donation_tx_updates_confirmed_when_horizon_succeeds() {
+        let fetcher = MockFetcher {
+            response: Ok(make_transaction_detail(
+                "txhash",
+                Some("txSUCCESS"),
+                Some(10),
+                Some("2026-06-22T00:00:00Z"),
+            )),
+        };
+        let repo = MockRepo::new();
+
+        let result = verify_and_confirm_donation_tx(&fetcher, &repo, "txhash", 1, 500).await;
+
+        assert_eq!(result, Ok(VerificationResult::Valid));
+        let updates = repo.updates.lock().unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0], ("txhash".to_string(), DonationStatus::Submitted, DonationStatus::Confirming));
+        assert_eq!(updates[1], ("txhash".to_string(), DonationStatus::Confirming, DonationStatus::Confirmed));
+    }
+
+    #[tokio::test]
+    async fn verify_and_confirm_donation_tx_marks_failed_when_result_code_invalid() {
+        let fetcher = MockFetcher {
+            response: Ok(make_transaction_detail(
+                "txhash",
+                Some("txFAILED"),
+                Some(10),
+                Some("2026-06-22T00:00:00Z"),
+            )),
+        };
+        let repo = MockRepo::new();
+
+        let result = verify_and_confirm_donation_tx(&fetcher, &repo, "txhash", 1, 500).await;
+
+        assert!(matches!(result, Ok(VerificationResult::Invalid(_))));
+        let updates = repo.updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0], ("txhash".to_string(), DonationStatus::Submitted, DonationStatus::Failed));
+    }
+
+    #[tokio::test]
+    async fn verify_and_confirm_donation_tx_returns_error_for_not_found() {
+        let fetcher = MockFetcher {
+            response: Err(HorizonError::NotFound),
+        };
+        let repo = MockRepo::new();
+
+        let result = verify_and_confirm_donation_tx(&fetcher, &repo, "txhash", 1, 500).await;
+
+        assert!(matches!(result, Err(StellarAidError::TransactionFailed(_))));
+        let updates = repo.updates.lock().unwrap();
+        assert!(updates.is_empty());
     }
 }

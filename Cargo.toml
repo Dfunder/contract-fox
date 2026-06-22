@@ -29,3 +29,4 @@ tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
+async-trait = "0.1"
