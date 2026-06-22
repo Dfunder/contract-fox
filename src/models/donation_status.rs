@@ -75,6 +75,29 @@ impl DonationStatus {
             }),
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DonationStatus::Pending => "pending",
+            DonationStatus::Submitted => "submitted",
+            DonationStatus::Confirming => "confirming",
+            DonationStatus::Confirmed => "confirmed",
+            DonationStatus::Failed => "failed",
+            DonationStatus::Refunded => "refunded",
+        }
+    }
+
+    pub fn from_str(status: &str) -> Result<Self, String> {
+        match status.to_lowercase().as_str() {
+            "pending" => Ok(DonationStatus::Pending),
+            "submitted" => Ok(DonationStatus::Submitted),
+            "confirming" => Ok(DonationStatus::Confirming),
+            "confirmed" => Ok(DonationStatus::Confirmed),
+            "failed" => Ok(DonationStatus::Failed),
+            "refunded" => Ok(DonationStatus::Refunded),
+            other => Err(format!("unknown donation status: {}", other)),
+        }
+    }
 }
 
 #[cfg(test)]

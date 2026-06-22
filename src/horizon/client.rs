@@ -2,10 +2,13 @@ use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum HorizonError {
+    #[error("request timeout: {0}")]
+    Timeout(String),
+
     #[error("reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
+    Reqwest(String),
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
@@ -13,8 +16,24 @@ pub enum HorizonError {
     #[error("http error {0}: {1}")]
     Http(u16, String),
 
+    #[error("not found")]
+    NotFound,
+
+    #[error("rate limited: {0}")]
+    RateLimited(String),
+
     #[error("other: {0}")]
     Other(String),
+}
+
+impl From<reqwest::Error> for HorizonError {
+    fn from(err: reqwest::Error) -> Self {
+        if err.is_timeout() {
+            HorizonError::Timeout(err.to_string())
+        } else {
+            HorizonError::Reqwest(err.to_string())
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -42,11 +61,16 @@ impl HorizonClient {
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
         let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(HorizonError::Http(status.as_u16(), text));
+        if status.is_success() {
+            let parsed = serde_json::from_str(&text)?;
+            return Ok(parsed);
         }
-        let parsed = serde_json::from_str(&text)?;
-        Ok(parsed)
+
+        match status.as_u16() {
+            404 => Err(HorizonError::NotFound),
+            429 => Err(HorizonError::RateLimited(text)),
+            code => Err(HorizonError::Http(code, text)),
+        }
     }
 
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
@@ -149,12 +173,14 @@ pub struct EmbeddedPayments {
     pub records: Vec<PaymentSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct TransactionDetail {
     pub id: String,
     pub hash: String,
     pub ledger: Option<u64>,
     pub created_at: Option<String>,
+    #[serde(rename = "result_code")]
+    pub result_code: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
 }
