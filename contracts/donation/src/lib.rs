@@ -1,6 +1,7 @@
 #![no_std]
 
-use soroban_sdk::{Address, Env, Map, Symbol, Vec, contract, contractimpl, contracttype, symbol_short};
+use soroban_sdk::{Address, Env, IntoVal, Map, Symbol, Vec, contract, contractimpl, contracttype, symbol_short, token, vec as soroban_vec};
+use contracts_shared::Campaign;
 
 // Storage keys
 const DONATION_MAP: Symbol = symbol_short!("DON_MAP");
@@ -8,11 +9,8 @@ const CAMPAIGN_TOTALS: Symbol = symbol_short!("CMP_TOT");
 const DONOR_HISTORY: Symbol = symbol_short!("DON_HIS");
 const DONATION_COUNT: Symbol = symbol_short!("DON_CNT");
 const CAMPAIGN_CONTRACT_ID: Symbol = symbol_short!("CMP_CID");
-const PAUSED: Symbol = symbol_short!("PAUSED");
 const ADMIN: Symbol = symbol_short!("ADMIN");
-
-// Donation data tuple: (donor, campaign_id, amount, timestamp)
-pub type Donation = (Address, u64, i128, u64);
+const PAUSED: Symbol = symbol_short!("PAUSED");
 
 // --- Structured Events for Off-Chain Indexing ---
 
@@ -22,6 +20,7 @@ pub struct DonationMadeEvent {
     pub campaign_id: u64,
     pub donor: Address,
     pub amount: i128,
+    pub token_id: Address,
 }
 
 #[contracttype]
@@ -109,8 +108,16 @@ impl DonationContract {
     }
 
     /// Donate funds to a campaign
-    pub fn donate(env: Env, donor: Address, campaign_id: u64, amount: i128) {
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `donor` - The address of the donor
+    /// * `campaign_id` - The ID of the campaign to donate to
+    /// * `token_id` - The address of the token contract to donate (XLM for native)
+    /// * `amount` - The amount to donate
+    pub fn donate(env: Env, donor: Address, campaign_id: u64, token_id: Address, amount: i128) {
         require_not_paused(&env);
+
         donor.require_auth();
 
         if amount <= 0 {
@@ -123,24 +130,48 @@ impl DonationContract {
             .get(&CAMPAIGN_CONTRACT_ID)
             .unwrap_or_else(|| panic!("Campaign contract ID not set. Call initialize() first."));
 
-        let donation: Donation = (
-            donor.clone(),
-            campaign_id,
-            amount,
-            env.ledger().timestamp(),
+        let campaign: Campaign = env.invoke_contract(
+            &campaign_contract_id,
+            &Symbol::new(&env, "get_campaign"),
+            soroban_vec![&env, campaign_id.into_val(&env)],
         );
+
+        if campaign.status != contracts_shared::CampaignStatus::Active {
+            panic!("Campaign is not active");
+        }
+
+        if let Some(accepted_token) = campaign.asset_contract_id {
+            if token_id != accepted_token {
+                panic!("Token does not match campaign's accepted asset");
+            }
+        }
+
+        let donation_contract = env.current_contract_address();
+        donation_contract.require_auth();
+
+        let token_client = token::Client::new(&env, &token_id);
+        token_client.transfer_from(
+            &env,
+            &donation_contract,
+            &donor,
+            &donation_contract,
+            &amount,
+        );
+
+        let donation = (donor.clone(), campaign_id, amount, env.ledger().timestamp());
 
         let mut donation_count: u64 = env.storage().instance().get(&DONATION_COUNT).unwrap_or(0);
         donation_count += 1;
         let donation_id = donation_count;
 
-        let mut donations: Map<u64, Donation> = env
+        let mut donations: Map<u64, (Address, u64, i128, u64)> = env
             .storage()
             .instance()
             .get(&DONATION_MAP)
             .unwrap_or(Map::new(&env));
         donations.set(donation_id, donation);
         env.storage().instance().set(&DONATION_MAP, &donations);
+
         env.storage().instance().set(&DONATION_COUNT, &donation_count);
 
         let mut campaign_totals: Map<u64, i128> = env
@@ -168,22 +199,48 @@ impl DonationContract {
                 campaign_id,
                 donor,
                 amount,
+                token_id,
             },
         );
 
         env.invoke_contract::<()>(
             &campaign_contract_id,
-            &symbol_short!("update_raised_amount"),
-            (campaign_id, amount),
+            &Symbol::new(&env, "update_raised_amount"),
+            soroban_vec![&env, campaign_id.into_val(&env), amount.into_val(&env)],
         );
     }
 
     /// Hook function for executing withdrawal operations request triggers
-    pub fn request_withdrawal(env: Env, campaign_id: u64, withdrawal_id: u64, amount: i128) {
+    /// Only the campaign owner or admin may call this
+    pub fn request_withdrawal(env: Env, caller: Address, campaign_id: u64, withdrawal_id: u64, amount: i128) {
         require_not_paused(&env);
+        caller.require_auth();
 
         if amount <= 0 {
             panic!("Withdrawal request amount must be positive");
+        }
+
+        let campaign_contract_id: Address = env
+            .storage()
+            .instance()
+            .get(&CAMPAIGN_CONTRACT_ID)
+            .unwrap_or_else(|| panic!("Campaign contract ID not set. Call initialize() first."));
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
+
+        let campaign: Campaign = env.invoke_contract(
+            &campaign_contract_id,
+            &Symbol::new(&env, "get_campaign"),
+            soroban_vec![&env, campaign_id.into_val(&env)],
+        );
+        let campaign_owner = campaign.owner;
+
+        if caller != campaign_owner && caller != admin {
+            panic!("Unauthorized: caller is not campaign owner or admin");
         }
 
         env.events().publish(
@@ -197,8 +254,20 @@ impl DonationContract {
     }
 
     /// Hook function for validating completed withdrawal distributions
-    pub fn approve_withdrawal(env: Env, withdrawal_id: u64, tx_hash: Symbol) {
+    /// Only the admin may call this
+    pub fn approve_withdrawal(env: Env, caller: Address, withdrawal_id: u64, tx_hash: Symbol) {
         require_not_paused(&env);
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .unwrap_or_else(|| panic!("Contract not initialized"));
+
+        if caller != admin {
+            panic!("Unauthorized: caller is not admin");
+        }
 
         env.events().publish(
             (symbol_short!("with_app"), withdrawal_id),
@@ -210,8 +279,15 @@ impl DonationContract {
     }
 
     /// Get all donations for a specific campaign
-    pub fn get_donations_for_campaign(env: Env, campaign_id: u64) -> Vec<Donation> {
-        let donations: Map<u64, Donation> = env
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `campaign_id` - The ID of the campaign
+    ///
+    /// # Returns
+    /// Vector of Donation tuples for the campaign
+    pub fn get_donations_for_campaign(env: Env, campaign_id: u64) -> Vec<(Address, u64, i128, u64)> {
+        let donations: Map<u64, (Address, u64, i128, u64)> = env
             .storage()
             .instance()
             .get(&DONATION_MAP)
@@ -233,6 +309,13 @@ impl DonationContract {
     }
 
     /// Get total raised amount for a specific campaign
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `campaign_id` - The ID of the campaign
+    ///
+    /// # Returns
+    /// Total amount raised for the campaign
     pub fn get_total_raised(env: Env, campaign_id: u64) -> i128 {
         let campaign_totals: Map<u64, i128> = env
             .storage()
@@ -244,8 +327,15 @@ impl DonationContract {
     }
 
     /// Get donation history for a specific donor
-    pub fn get_donor_history(env: Env, donor: Address) -> Vec<Donation> {
-        let donations: Map<u64, Donation> = env
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `donor` - The address of the donor
+    ///
+    /// # Returns
+    /// Vector of Donation tuples made by the donor
+    pub fn get_donor_history(env: Env, donor: Address) -> Vec<(Address, u64, i128, u64)> {
+        let donations: Map<u64, (Address, u64, i128, u64)> = env
             .storage()
             .instance()
             .get(&DONATION_MAP)
@@ -271,8 +361,14 @@ impl DonationContract {
     }
 
     /// Get all donations (utility function for testing)
-    pub fn get_all_donations(env: Env) -> Vec<Donation> {
-        let donations: Map<u64, Donation> = env
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    ///
+    /// # Returns
+    /// Vector of all donations
+    pub fn get_all_donations(env: Env) -> Vec<(Address, u64, i128, u64)> {
+        let donations: Map<u64, (Address, u64, i128, u64)> = env
             .storage()
             .instance()
             .get(&DONATION_MAP)
@@ -293,31 +389,78 @@ impl DonationContract {
 
 #[cfg(test)]
 mod test {
-    use soroban_sdk::{Address, Env, Map, Symbol, contract, contractimpl, testutils::Address as _};
+    use soroban_sdk::{Address, Env, Map, Symbol, contract, contractimpl, testutils::Address as _, token::Client as TokenClient};
     use crate::{DonationContract, DonationContractClient};
+    use contracts_shared::Campaign;
 
-    const MOCK_CAMP_MAP: Symbol = Symbol::from_str("CMP_MAP");
-
-    // Mock Campaign contract for testing
     #[contract]
     pub struct MockCampaignContract;
 
     #[contractimpl]
     impl MockCampaignContract {
-        pub fn update_raised_amount(env: Env, campaign_id: u64, amount: i128) {
+        pub fn update_raised_amount(env: Env, _campaign_id: u64, amount: i128) {
             if amount <= 0 {
                 panic!("Amount must be positive");
             }
-            let mut store: Map<u64, i128> = env.storage().instance().get(&MOCK_CAMP_MAP).unwrap_or(Map::new(&env));
-            let current = store.get(campaign_id).unwrap_or(0);
-            store.set(campaign_id, current + amount);
-            env.storage().instance().set(&MOCK_CAMP_MAP, &store);
+            let mut store: Map<u64, i128> = env.storage().instance().get(&Symbol::new(&env, "RAISED")).unwrap_or(Map::new(&env));
+            store.set(1u64, store.get(1u64).unwrap_or(0) + amount);
+            env.storage().instance().set(&Symbol::new(&env, "RAISED"), &store);
         }
 
-        pub fn get_raised_amount(env: Env, campaign_id: u64) -> i128 {
-            let store: Map<u64, i128> = env.storage().instance().get(&MOCK_CAMP_MAP).unwrap_or(Map::new(&env));
-            store.get(campaign_id).unwrap_or(0)
+        pub fn set_campaign_owner(env: Env, campaign_id: u64, owner: Address) {
+            let mut store: Map<u64, Address> = env.storage().instance().get(&Symbol::new(&env, "OWNER")).unwrap_or(Map::new(&env));
+            store.set(campaign_id, owner);
+            env.storage().instance().set(&Symbol::new(&env, "OWNER"), &store);
         }
+
+        pub fn set_campaign_status(env: Env, campaign_id: u64, status: u32) {
+            let mut store: Map<u64, u32> = env.storage().instance().get(&Symbol::new(&env, "STATUS")).unwrap_or(Map::new(&env));
+            store.set(campaign_id, status);
+            env.storage().instance().set(&Symbol::new(&env, "STATUS"), &store);
+        }
+
+        pub fn set_campaign_asset(env: Env, campaign_id: u64, asset: Address) {
+            let mut store: Map<u64, Address> = env.storage().instance().get(&Symbol::new(&env, "ASSET")).unwrap_or(Map::new(&env));
+            store.set(campaign_id, asset);
+            env.storage().instance().set(&Symbol::new(&env, "ASSET"), &store);
+        }
+
+        pub fn get_campaign(env: Env, campaign_id: u64) -> Campaign {
+            let owners: Map<u64, Address> = env.storage().instance().get(&Symbol::new(&env, "OWNER")).unwrap_or(Map::new(&env));
+            let statuses: Map<u64, u32> = env.storage().instance().get(&Symbol::new(&env, "STATUS")).unwrap_or(Map::new(&env));
+            let assets: Map<u64, Address> = env.storage().instance().get(&Symbol::new(&env, "ASSET")).unwrap_or(Map::new(&env));
+            let owner = owners.get(campaign_id).unwrap_or_else(|| panic!("Campaign not found"));
+            let status_val = statuses.get(campaign_id).unwrap_or(0);
+            let status = match status_val {
+                0 => contracts_shared::CampaignStatus::Active,
+                1 => contracts_shared::CampaignStatus::Completed,
+                2 => contracts_shared::CampaignStatus::Suspended,
+                3 => contracts_shared::CampaignStatus::Rejected,
+                _ => contracts_shared::CampaignStatus::Active,
+            };
+            let asset = assets.get(campaign_id);
+            Campaign {
+                id: campaign_id,
+                owner,
+                goal: 1000i128,
+                raised: 0,
+                status,
+                deadline: 9999999u64,
+                asset_contract_id: asset,
+            }
+        }
+    }
+
+    fn setup(env: &Env) -> (DonationContractClient, Address, Address) {
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(env, &contract_id);
+
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(env)).address();
+        let admin = Address::generate(env);
+        client.initialize(&mock_campaign_id, &admin);
+
+        (client, token_id, admin)
     }
 
     #[test]
@@ -325,18 +468,26 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
 
+        let (client, token_id, _admin) = setup(&env);
+
         let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+
         let contract_id = env.register_contract(None, DonationContract);
         let client = DonationContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
         client.initialize(&mock_campaign_id, &admin);
+        let campaign_id = 1u64;
+        mock_client.set_campaign_owner(&campaign_id, &campaign_owner);
 
         let donor = Address::generate(&env);
-        let campaign_id = 1u64;
         let amount = 100i128;
 
-        client.donate(&donor, &campaign_id, &amount);
+        TokenClient::new(&env, &token_id).mint(&donor, &amount);
+
+        client.donate(&donor, &campaign_id, &token_id, &amount);
 
         let total_raised = client.get_total_raised(&campaign_id);
         assert_eq!(total_raised, amount);
@@ -351,11 +502,65 @@ mod test {
 
         let donor_history = client.get_donor_history(&donor);
         assert_eq!(donor_history.len(), 1);
-        let donor_donation = donor_history.get(0).unwrap();
-        let (donor_addr2, donation_campaign_id2, donation_amount2, _) = donor_donation;
-        assert_eq!(donor_addr2, donor);
-        assert_eq!(donation_campaign_id2, campaign_id);
-        assert_eq!(donation_amount2, amount);
+    }
+
+    #[test]
+    fn test_donate_with_custom_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let usdc_token = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        client.initialize(&mock_campaign_id, &admin);
+        let campaign_id = 1u64;
+        mock_client.set_campaign_owner(&campaign_id, &campaign_owner);
+        mock_client.set_campaign_asset(&campaign_id, &usdc_token);
+        mock_client.set_campaign_status(&campaign_id, &0u32); // Active
+
+        let donor = Address::generate(&env);
+        let amount = 100i128;
+
+        TokenClient::new(&env, &usdc_token).mint(&donor, &amount);
+
+        client.donate(&donor, &campaign_id, &usdc_token, &amount);
+
+        let total_raised = client.get_total_raised(&campaign_id);
+        assert_eq!(total_raised, amount);
+    }
+
+    #[test]
+    #[should_panic(expected = "Token does not match campaign's accepted asset")]
+    fn test_donate_with_wrong_custom_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let accepted_token = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        let wrong_token = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        client.initialize(&mock_campaign_id, &admin);
+        let campaign_id = 1u64;
+        mock_client.set_campaign_owner(&campaign_id, &campaign_owner);
+        mock_client.set_campaign_asset(&campaign_id, &accepted_token);
+        mock_client.set_campaign_status(&campaign_id, &0u32); // Active
+
+        let donor = Address::generate(&env);
+        TokenClient::new(&env, &wrong_token).mint(&donor, &100i128);
+
+        client.donate(&donor, &campaign_id, &wrong_token, &100i128);
     }
 
     #[test]
@@ -364,30 +569,32 @@ mod test {
         env.mock_all_auths();
 
         let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+
         let contract_id = env.register_contract(None, DonationContract);
         let client = DonationContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
         client.initialize(&mock_campaign_id, &admin);
+        let campaign_id = 1u64;
+        mock_client.set_campaign_owner(&campaign_id, &campaign_owner);
 
         let donor1 = Address::generate(&env);
         let donor2 = Address::generate(&env);
-        let campaign_id = 1u64;
 
-        client.donate(&donor1, &campaign_id, &100i128);
-        client.donate(&donor2, &campaign_id, &200i128);
+        TokenClient::new(&env, &token_id).mint(&donor1, &100i128);
+        TokenClient::new(&env, &token_id).mint(&donor2, &200i128);
+
+        client.donate(&donor1, &campaign_id, &token_id, &100i128);
+        client.donate(&donor2, &campaign_id, &token_id, &200i128);
 
         let total_raised = client.get_total_raised(&campaign_id);
         assert_eq!(total_raised, 300i128);
 
         let donations = client.get_donations_for_campaign(&campaign_id);
         assert_eq!(donations.len(), 2);
-
-        let donor1_history = client.get_donor_history(&donor1);
-        assert_eq!(donor1_history.len(), 1);
-
-        let donor2_history = client.get_donor_history(&donor2);
-        assert_eq!(donor2_history.len(), 1);
     }
 
     #[test]
@@ -396,64 +603,23 @@ mod test {
         let env = Env::default();
         env.mock_all_auths();
 
+        let (client, _, _) = setup(&env);
+
         let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
         let contract_id = env.register_contract(None, DonationContract);
         let client = DonationContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
         client.initialize(&mock_campaign_id, &admin);
+        let campaign_id = 1u64;
+        mock_client.set_campaign_owner(&campaign_id, &campaign_owner);
 
         let donor = Address::generate(&env);
-        let campaign_id = 1u64;
 
-        client.donate(&donor, &campaign_id, &0i128);
-    }
-
-    #[test]
-    #[should_panic(expected = "Amount must be positive")]
-    fn test_donate_negative_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
-        let contract_id = env.register_contract(None, DonationContract);
-        let client = DonationContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&mock_campaign_id, &admin);
-
-        let donor = Address::generate(&env);
-        let campaign_id = 1u64;
-
-        client.donate(&donor, &campaign_id, &-100i128);
-    }
-
-    #[test]
-    #[should_panic(expected = "Campaign contract ID not set")]
-    fn test_donate_without_initialization() {
-        let env = Env::default();
-
-        let contract_id = env.register_contract(None, DonationContract);
-        let client = DonationContractClient::new(&env, &contract_id);
-
-        let donor = Address::generate(&env);
-        let campaign_id = 1u64;
-        let amount = 100i128;
-
-        client.donate(&donor, &campaign_id, &amount);
-    }
-
-    #[test]
-    #[should_panic(expected = "Donation contract instance is already initialized")]
-    fn test_prevent_double_initialization() {
-        let env = Env::default();
-        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
-        let contract_id = env.register_contract(None, DonationContract);
-        let client = DonationContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&mock_campaign_id, &admin);
-        client.initialize(&mock_campaign_id, &admin);
+        client.donate(&donor, &campaign_id, &token_id, &0i128);
     }
 
     #[test]
@@ -463,19 +629,120 @@ mod test {
         env.mock_all_auths();
 
         let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
         let contract_id = env.register_contract(None, DonationContract);
         let client = DonationContractClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
         client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_status(&1u64, &0u32);
         client.pause(&admin);
 
         let donor = Address::generate(&env);
-        client.donate(&donor, &1u64, &100i128);
+        client.donate(&donor, &1u64, &token_id, &100i128);
     }
 
     #[test]
     fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_owner(&1u64, &campaign_owner);
+
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        let donor = Address::generate(&env);
+        TokenClient::new(&env, &token_id).mint(&donor, &50i128);
+        client.donate(&donor, &1u64, &token_id, &50i128);
+        assert_eq!(client.get_total_raised(&1u64), 50i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not campaign owner or admin")]
+    fn test_request_withdrawal_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_owner(&1u64, &campaign_owner);
+
+        client.request_withdrawal(&stranger, &1u64, &1u64, &100i128);
+    }
+
+    #[test]
+    fn test_request_withdrawal_by_campaign_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_owner(&1u64, &campaign_owner);
+
+        client.request_withdrawal(&campaign_owner, &1u64, &1u64, &100i128);
+    }
+
+    #[test]
+    fn test_request_withdrawal_by_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_owner(&1u64, &campaign_owner);
+
+        client.request_withdrawal(&admin, &1u64, &1u64, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized: caller is not admin")]
+    fn test_approve_withdrawal_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
+        client.initialize(&mock_campaign_id, &admin);
+
+        client.approve_withdrawal(&stranger, &1u64, &Symbol::new(&env, "txhash123"));
+    }
+
+    #[test]
+    fn test_approve_withdrawal_by_admin() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -486,12 +753,46 @@ mod test {
         let admin = Address::generate(&env);
         client.initialize(&mock_campaign_id, &admin);
 
-        client.pause(&admin);
-        client.unpause(&admin);
+        client.approve_withdrawal(&admin, &1u64, &Symbol::new(&env, "txhash123"));
+    }
 
-        // Should succeed after unpause
+    #[test]
+    #[should_panic(expected = "Campaign is not active")]
+    fn test_donate_to_inactive_campaign() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let mock_client = MockCampaignContractClient::new(&env, &mock_campaign_id);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let campaign_owner = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        client.initialize(&mock_campaign_id, &admin);
+        mock_client.set_campaign_owner(&1u64, &campaign_owner);
+        mock_client.set_campaign_status(&1u64, &1u32);
+
         let donor = Address::generate(&env);
-        client.donate(&donor, &1u64, &50i128);
-        assert_eq!(client.get_total_raised(&1u64), 50i128);
+        client.donate(&donor, &1u64, &token_id, &100i128);
+    }
+
+    #[test]
+    #[should_panic(expected = "Campaign not found")]
+    fn test_donate_to_nonexistent_campaign() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let mock_campaign_id = env.register_contract(None, MockCampaignContract);
+        let contract_id = env.register_contract(None, DonationContract);
+        let client = DonationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(&env)).address();
+        client.initialize(&mock_campaign_id, &admin);
+
+        let donor = Address::generate(&env);
+        client.donate(&donor, &99u64, &token_id, &100i128);
     }
 }

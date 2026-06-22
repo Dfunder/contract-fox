@@ -1,8 +1,11 @@
 pub mod config;
+pub mod db;
 pub mod errors;
+pub mod models;
 
 pub mod friendbot;
 pub mod horizon;
+pub mod services;
 mod setup;
 pub mod utils;
 
