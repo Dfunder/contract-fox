@@ -7,7 +7,7 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NewDonation {
     pub tx_hash: String,
     pub campaign_id: String,
@@ -31,19 +31,22 @@ pub struct Donation {
     pub created_at: String,
 }
 
+/// SQLite-backed donations repository.
+///
+/// The connection is wrapped in a [`std::sync::Mutex`] because `Connection`
+/// is `!Sync` (its internal `StatementCache` uses `RefCell`). Wrapping makes
+/// the repo both `Send` and `Sync`, which is what `axum` requires for
+/// `AppState`. SQLite operations are brief so contention is acceptable for
+/// the donation-submission throughput.
 pub struct DonationsRepo {
-    conn: Connection,
+    conn: std::sync::Mutex<Connection>,
 }
 
 impl DonationsRepo {
     pub fn new(conn: Connection) -> Result<Self, DbError> {
-        let repo = Self { conn };
-        repo.init_schema()?;
-        Ok(repo)
-    }
-
-    fn init_schema(&self) -> Result<(), DbError> {
-        self.conn.execute(
+        // Initialise schema directly on the freshly created connection
+        // (mutex not yet installed).
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS donations (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 tx_hash         TEXT    NOT NULL UNIQUE,
@@ -57,12 +60,22 @@ impl DonationsRepo {
             )",
             [],
         )?;
-        Ok(())
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+
+    /// Acquire the connection lock, panicking if it has been poisoned. SQLite
+    /// is local and panic-free in the hot path; poisoning would only occur
+    /// after another thread panicked while holding the lock.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("DonationsRepo lock poisoned")
     }
 
     /// Save a donation. Returns the existing record if `tx_hash` already exists (idempotent).
     pub fn save_donation(&self, donation: &NewDonation) -> Result<Donation, DbError> {
-        self.conn.execute(
+        let conn = self.lock();
+        conn.execute(
             "INSERT OR IGNORE INTO donations
                 (tx_hash, campaign_id, donor_address, donor_user_id, amount, status, memo, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
@@ -77,7 +90,7 @@ impl DonationsRepo {
             ],
         )?;
 
-        let record = self.conn.query_row(
+        let record = conn.query_row(
             "SELECT id, tx_hash, campaign_id, donor_address, donor_user_id, amount, status, memo, created_at
              FROM donations WHERE tx_hash = ?1",
             params![donation.tx_hash],
@@ -99,14 +112,15 @@ impl DonationsRepo {
         Ok(record)
     }
 
-    /// Get all donations for a campaign, with anonymous display name logic
+    /// Get all donations for a campaign, with anonymous display name logic.
     pub fn get_campaign_donations(
         &self,
         campaign_id: &str,
     ) -> Result<Vec<(String, u64, String)>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT donor_address, donor_user_id, amount, created_at 
-             FROM donations 
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT donor_address, donor_user_id, amount, created_at
+             FROM donations
              WHERE campaign_id = ?1 AND status = 'confirmed'
              ORDER BY created_at DESC",
         )?;
@@ -117,12 +131,10 @@ impl DonationsRepo {
             let amount: u64 = row.get(2)?;
             let created_at: String = row.get(3)?;
 
-            // If no user is linked, display as "Anonymous Donor"
+            // If no user is linked, display as "Anonymous Donor".
             let display_name = if donor_user_id.is_none() {
                 "Anonymous Donor".to_string()
             } else {
-                // For registered users, we could look up their username, but here we just use the address
-                // In a real app, you would join with a users table to get the username
                 donor_address
             };
 
@@ -137,11 +149,12 @@ impl DonationsRepo {
         Ok(results)
     }
 
-    /// Get campaign stats (total raised, donation count)
+    /// Get campaign stats (total raised, donation count).
     pub fn get_campaign_stats(&self, campaign_id: &str) -> Result<(u64, u64), DbError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
             "SELECT COALESCE(SUM(amount), 0) as total_raised, COUNT(*) as donation_count
-             FROM donations 
+             FROM donations
              WHERE campaign_id = ?1 AND status = 'confirmed'",
         )?;
 
@@ -194,9 +207,7 @@ mod tests {
     #[test]
     fn get_campaign_donations_displays_anonymous() {
         let repo = in_memory_repo();
-        // Add a registered user donation
         repo.save_donation(&sample()).unwrap();
-        // Add an anonymous donation
         let anonymous_donation = NewDonation {
             tx_hash: "anonymous456".to_string(),
             campaign_id: "campaign-1".to_string(),
@@ -211,7 +222,6 @@ mod tests {
         let donations = repo.get_campaign_donations("campaign-1").unwrap();
         assert_eq!(donations.len(), 2);
 
-        // Check that we have both donations, regardless of order (timestamps might be identical)
         let has_anonymous = donations
             .iter()
             .any(|(name, amount, _)| name == "Anonymous Donor" && *amount == 500);
@@ -284,5 +294,13 @@ mod tests {
             })
             .unwrap();
         assert_ne!(a.id, b.id);
+    }
+
+    /// The repo must be `Send + Sync` so it can live inside an `AppState`
+    /// shared across axum worker tasks.
+    #[test]
+    fn repo_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DonationsRepo>();
     }
 }

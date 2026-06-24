@@ -47,6 +47,10 @@ pub enum StellarAidError {
     /// A lower-level network / HTTP / I/O error.
     #[error("Network error: {0}")]
     NetworkError(String),
+
+    /// A database operation failed.
+    #[error("Database error: {0}")]
+    DatabaseError(String),
 }
 
 // ── From impls for ergonomic `?` propagation ────────────────────────────────
@@ -76,6 +80,27 @@ impl From<TokenSetupError> for StellarAidError {
 impl From<reqwest::Error> for StellarAidError {
     fn from(err: reqwest::Error) -> Self {
         Self::NetworkError(err.to_string())
+    }
+}
+
+impl From<crate::soroban::rpc_client::RpcError> for StellarAidError {
+    fn from(err: crate::soroban::rpc_client::RpcError) -> Self {
+        match err {
+            crate::soroban::rpc_client::RpcError::Http(e) => Self::NetworkError(e.to_string()),
+            crate::soroban::rpc_client::RpcError::Rpc { code, message } => {
+                Self::SorobanError { code, message }
+            }
+            crate::soroban::rpc_client::RpcError::Deserialize(msg) => Self::SorobanError {
+                code: -32700,
+                message: format!("deserialize: {msg}"),
+            },
+        }
+    }
+}
+
+impl From<crate::db::donations_repo::DbError> for StellarAidError {
+    fn from(err: crate::db::donations_repo::DbError) -> Self {
+        Self::DatabaseError(err.to_string())
     }
 }
 
@@ -142,5 +167,41 @@ mod tests {
         };
         assert!(err.to_string().contains("-32600"));
         assert!(err.to_string().contains("invalid request"));
+    }
+
+    #[test]
+    fn rpc_http_error_converts_to_network() {
+        let err: StellarAidError =
+            crate::soroban::rpc_client::RpcError::Deserialize("missing field".into()).into();
+        assert!(matches!(err, StellarAidError::SorobanError { .. }));
+        assert!(err.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn rpc_rpc_error_preserves_code() {
+        let err: StellarAidError = crate::soroban::rpc_client::RpcError::Rpc {
+            code: -32601,
+            message: "method not found".into(),
+        }
+        .into();
+        match err {
+            StellarAidError::SorobanError { code, message } => {
+                assert_eq!(code, -32601);
+                assert_eq!(message, "method not found");
+            }
+            other => panic!("expected SorobanError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn db_error_converts_to_database_variant() {
+        // Use a non-existent path to provoke a SQLite error.
+        let conn = rusqlite::Connection::open("/this/path/does/not/exist/db.sqlite");
+        let db_err = match conn {
+            Ok(_) => panic!("expected open to fail"),
+            Err(e) => crate::db::donations_repo::DbError::Sqlite(e),
+        };
+        let err: StellarAidError = db_err.into();
+        assert!(matches!(err, StellarAidError::DatabaseError(_)));
     }
 }
