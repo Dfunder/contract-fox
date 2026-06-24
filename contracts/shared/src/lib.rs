@@ -2,4 +2,4 @@
 
 pub mod types;
 
-pub use types::{Campaign, CampaignStatus, Donation, Withdrawal};
+pub use types::{AssetContract, Campaign, CampaignStatus, Donation, Withdrawal};
