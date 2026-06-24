@@ -137,6 +137,23 @@ impl DonationsRepo {
         Ok(results)
     }
 
+    /// Mark a donation as refunded in the database.
+    ///
+    /// Off-chain indexers should call this when they observe a
+    /// `DonationRefunded` event from the contract, passing the
+    /// `original_tx_hash` field of that event.
+    ///
+    /// Returns `true` if a donation with the given `tx_hash` was
+    /// found and updated to status `refunded`, `false` if no
+    /// matching donation existed.
+    pub fn mark_refunded(&self, tx_hash: &str) -> Result<bool, DbError> {
+        let updated = self.conn.execute(
+            "UPDATE donations SET status = 'refunded' WHERE tx_hash = ?1",
+            params![tx_hash],
+        )?;
+        Ok(updated > 0)
+    }
+
     /// Get campaign stats (total raised, donation count)
     pub fn get_campaign_stats(&self, campaign_id: &str) -> Result<(u64, u64), DbError> {
         let mut stmt = self.conn.prepare(
@@ -284,5 +301,63 @@ mod tests {
             })
             .unwrap();
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn mark_refunded_updates_status_and_returns_true() {
+        let repo = in_memory_repo();
+        let saved = repo.save_donation(&sample()).unwrap();
+        assert_eq!(saved.status, "confirmed");
+
+        assert!(repo.mark_refunded(&saved.tx_hash).unwrap());
+
+        // Refetch (via idempotent save_donation) and confirm status changed.
+        let refetched = repo
+            .save_donation(&NewDonation {
+                tx_hash: saved.tx_hash.clone(),
+                ..sample()
+            })
+            .unwrap();
+        assert_eq!(refetched.status, "refunded");
+
+        // Stats should now exclude the refunded donation.
+        let (total_raised, count) = repo.get_campaign_stats(&saved.campaign_id).unwrap();
+        assert_eq!(total_raised, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mark_refunded_returns_false_when_donation_missing() {
+        let repo = in_memory_repo();
+        assert!(!repo.mark_refunded("nonexistent_tx_hash").unwrap());
+    }
+
+    #[test]
+    fn mark_refunded_only_affects_targeted_donation() {
+        let repo = in_memory_repo();
+        let a = repo.save_donation(&sample()).unwrap();
+        let b = repo
+            .save_donation(&NewDonation {
+                tx_hash: "tx_b".to_string(),
+                ..sample()
+            })
+            .unwrap();
+
+        repo.mark_refunded(&a.tx_hash).unwrap();
+
+        let a_refetch = repo
+            .save_donation(&NewDonation {
+                tx_hash: a.tx_hash.clone(),
+                ..sample()
+            })
+            .unwrap();
+        let b_refetch = repo
+            .save_donation(&NewDonation {
+                tx_hash: b.tx_hash.clone(),
+                ..sample()
+            })
+            .unwrap();
+        assert_eq!(a_refetch.status, "refunded");
+        assert_eq!(b_refetch.status, "confirmed");
     }
 }
