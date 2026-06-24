@@ -20,20 +20,20 @@ pub enum RpcError {
 #[derive(Serialize)]
 struct JsonRpcRequest<'a> {
     jsonrpc: &'static str,
-    id:      u64,
-    method:  &'a str,
-    params:  serde_json::Value,
+    id: u64,
+    method: &'a str,
+    params: serde_json::Value,
 }
 
 #[derive(Deserialize)]
 struct JsonRpcResponse<T> {
     result: Option<T>,
-    error:  Option<JsonRpcError>,
+    error: Option<JsonRpcError>,
 }
 
 #[derive(Deserialize)]
 struct JsonRpcError {
-    code:    i64,
+    code: i64,
     message: String,
 }
 
@@ -43,13 +43,13 @@ struct JsonRpcError {
 #[derive(Debug, Deserialize)]
 pub struct SimulationResult {
     /// Estimated resource cost.
-    pub cost:   Option<SimulationCost>,
+    pub cost: Option<SimulationCost>,
     /// Encoded footprint XDR.
     pub footprint: Option<String>,
     /// Per-auth entries (may be empty).
-    pub auth:   Option<Vec<String>>,
+    pub auth: Option<Vec<String>>,
     /// Error string, present when simulation failed.
-    pub error:  Option<String>,
+    pub error: Option<String>,
     /// Latest ledger at time of simulation.
     #[serde(rename = "latestLedger")]
     pub latest_ledger: Option<String>,
@@ -67,7 +67,7 @@ pub struct SimulationCost {
 #[derive(Debug, Deserialize)]
 pub struct SendResult {
     /// Transaction hash.
-    pub hash:   String,
+    pub hash: String,
     /// Immediate status after submission.
     pub status: TransactionStatus,
     /// Error XDR if submission was immediately rejected.
@@ -81,7 +81,7 @@ pub struct SendResult {
 }
 
 /// All statuses defined by the Soroban RPC spec.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionStatus {
     Pending,
@@ -94,7 +94,7 @@ pub enum TransactionStatus {
 }
 
 /// Full response from `getTransaction`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TransactionStatusResponse {
     pub status: TransactionStatus,
     /// Result XDR, present on SUCCESS.
@@ -116,22 +116,40 @@ pub struct TransactionStatusResponse {
     pub latest_ledger_close_time: Option<String>,
 }
 
+// ── Trait abstraction ──────────────────────────────────────────────────────────
+
+/// Async abstraction over a Soroban JSON-RPC endpoint.
+///
+/// The HTTP handlers depend on this trait so they can be unit-tested with a
+/// mock implementation instead of hitting the network.
+#[async_trait::async_trait]
+pub trait SorobanRpc: Send + Sync {
+    /// Submit a signed transaction to the network.
+    async fn send_transaction(&self, xdr: &str) -> Result<SendResult, RpcError>;
+
+    /// Poll the status of a previously submitted transaction by its hash.
+    async fn get_transaction_status(
+        &self,
+        hash: &str,
+    ) -> Result<TransactionStatusResponse, RpcError>;
+}
+
 // ── Client ─────────────────────────────────────────────────────────────────────
 
 /// A typed JSON-RPC client for a Soroban-enabled Horizon/RPC endpoint.
 pub struct SorobanRpcClient {
-    http:     Client,
+    http: Client,
     endpoint: String,
-    next_id:  std::sync::atomic::AtomicU64,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl SorobanRpcClient {
     /// Create a new client targeting `endpoint` (e.g. `"https://soroban-testnet.stellar.org"`).
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
-            http:     Client::new(),
+            http: Client::new(),
             endpoint: endpoint.into(),
-            next_id:  std::sync::atomic::AtomicU64::new(1),
+            next_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -165,7 +183,7 @@ impl SorobanRpcClient {
 
         if let Some(err) = resp.error {
             return Err(RpcError::Rpc {
-                code:    err.code,
+                code: err.code,
                 message: err.message,
             });
         }
@@ -180,21 +198,16 @@ impl SorobanRpcClient {
     /// Simulate a transaction without submitting it.
     ///
     /// `xdr` is the base64-encoded TransactionEnvelope XDR.
-    pub async fn simulate_transaction(
-        &self,
-        xdr: &str,
-    ) -> Result<SimulationResult, RpcError> {
+    pub async fn simulate_transaction(&self, xdr: &str) -> Result<SimulationResult, RpcError> {
         let params = serde_json::json!({ "transaction": xdr });
-        self.call::<SimulationResult>("simulateTransaction", params).await
+        self.call::<SimulationResult>("simulateTransaction", params)
+            .await
     }
 
     /// Submit a signed transaction to the network.
     ///
     /// `xdr` is the base64-encoded TransactionEnvelope XDR.
-    pub async fn send_transaction(
-        &self,
-        xdr: &str,
-    ) -> Result<SendResult, RpcError> {
+    pub async fn send_transaction(&self, xdr: &str) -> Result<SendResult, RpcError> {
         let params = serde_json::json!({ "transaction": xdr });
         self.call::<SendResult>("sendTransaction", params).await
     }
@@ -205,7 +218,23 @@ impl SorobanRpcClient {
         hash: &str,
     ) -> Result<TransactionStatusResponse, RpcError> {
         let params = serde_json::json!({ "hash": hash });
-        self.call::<TransactionStatusResponse>("getTransaction", params).await
+        self.call::<TransactionStatusResponse>("getTransaction", params)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl SorobanRpc for SorobanRpcClient {
+    async fn send_transaction(&self, xdr: &str) -> Result<SendResult, RpcError> {
+        // Delegate to the inherent method to avoid trait/inherent ambiguity.
+        SorobanRpcClient::send_transaction(self, xdr).await
+    }
+
+    async fn get_transaction_status(
+        &self,
+        hash: &str,
+    ) -> Result<TransactionStatusResponse, RpcError> {
+        SorobanRpcClient::get_transaction_status(self, hash).await
     }
 }
 
@@ -217,24 +246,19 @@ mod tests {
 
     #[test]
     fn status_deserializes_correctly() {
-        let s: TransactionStatus =
-            serde_json::from_str(r#""SUCCESS""#).unwrap();
+        let s: TransactionStatus = serde_json::from_str(r#""SUCCESS""#).unwrap();
         assert_eq!(s, TransactionStatus::Success);
 
-        let s: TransactionStatus =
-            serde_json::from_str(r#""PENDING""#).unwrap();
+        let s: TransactionStatus = serde_json::from_str(r#""PENDING""#).unwrap();
         assert_eq!(s, TransactionStatus::Pending);
 
-        let s: TransactionStatus =
-            serde_json::from_str(r#""FAILED""#).unwrap();
+        let s: TransactionStatus = serde_json::from_str(r#""FAILED""#).unwrap();
         assert_eq!(s, TransactionStatus::Failed);
 
-        let s: TransactionStatus =
-            serde_json::from_str(r#""NOT_FOUND""#).unwrap();
+        let s: TransactionStatus = serde_json::from_str(r#""NOT_FOUND""#).unwrap();
         assert_eq!(s, TransactionStatus::NotFound);
 
-        let s: TransactionStatus =
-            serde_json::from_str(r#""SOME_FUTURE_STATUS""#).unwrap();
+        let s: TransactionStatus = serde_json::from_str(r#""SOME_FUTURE_STATUS""#).unwrap();
         assert_eq!(s, TransactionStatus::Unknown);
     }
 
