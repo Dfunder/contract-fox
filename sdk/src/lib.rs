@@ -20,6 +20,14 @@ pub enum StellarAidError {
     TransactionFailed(String),
 }
 
+/// Allow `?` propagation from internal `Result<_, String>` helpers without
+/// requiring every call-site to map errors explicitly.
+impl From<String> for StellarAidError {
+    fn from(err: String) -> Self {
+        Self::ValidationError(err)
+    }
+}
+
 /// Contract Fox SDK - Common utilities for smart contracts
 pub mod types;
 pub mod utils;

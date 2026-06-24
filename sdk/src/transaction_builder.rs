@@ -1,10 +1,10 @@
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use soroban_sdk::xdr::{
-    AccountId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Memo,
-    MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ScAddress, ScSymbol, ScVal,
-    SequenceNumber, SorobanTransactionData, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionV1Envelope, Uint256, WriteXdr,
+    AccountId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
+    Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ReadXdr, ScAddress,
+    ScSymbol, ScVal, SequenceNumber, SorobanTransactionData, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionV1Envelope, Uint256, WriteXdr,
 };
 use stellar_strkey::ed25519::PublicKey as StrkeyPublicKey;
 
@@ -36,7 +36,7 @@ pub fn build_donate_transaction(
         }
     }
 
-    let seq_num = fetch_sequence_number(donor, network.horizon_url)
+    let seq_num = fetch_sequence_number(donor, &network.horizon_url)
         .map_err(|e| StellarAidError::NetworkError(format!("Failed to fetch sequence: {}", e)))?;
 
     let contract_id_str = std::env::var("DONATION_CONTRACT_ID")
@@ -50,9 +50,9 @@ pub fn build_donate_transaction(
         campaign_id,
         token_id_bytes,
         amount,
+        memo,
         contract_id_bytes,
-    )
-    .map_err(|e| StellarAidError::ValidationError(e))?;
+    )?;
 
     let mut tx = Transaction {
         source_account: MuxedAccount::Ed25519(Uint256(donor_pubkey)),
@@ -69,17 +69,12 @@ pub fn build_donate_transaction(
         signatures: vec![].try_into().unwrap(),
     });
 
-    let base64_tx = envelope.to_xdr_base64().map_err(|_| {
+    let base64_tx = envelope.to_xdr_base64(Limits::none()).map_err(|_| {
         StellarAidError::TransactionFailed("Failed to encode tx to base64".to_string())
     })?;
 
     let (min_fee, soroban_data, auth_entries) =
-        simulate_transaction(&base64_tx, network.soroban_rpc_url).map_err(|e| {
-            StellarAidError::SorobanError {
-                code: -1,
-                message: e,
-            }
-        })?;
+        simulate_transaction(&base64_tx, &network.soroban_rpc_url)?;
 
     tx.fee = min_fee as u32 + 100;
     tx.ext = TransactionExt::V1(soroban_data);
@@ -88,21 +83,29 @@ pub fn build_donate_transaction(
         donor_pubkey,
     ))));
 
-    for (i, auth_entry) in auth_entries.iter().enumerate() {
-        if let Some(op) = tx.operations.get(i) {
-            if let OperationBody::InvokeHostFunction(mut invoke_op) = op.body.clone() {
-                invoke_op.auth = vec![auth_entry.clone()].try_into().unwrap();
-                tx.operations[i].body = OperationBody::InvokeHostFunction(invoke_op);
+    // VecM<Operation> doesn't expose IndexMut in soroban-sdk 20.5.0, so clone
+    // each op into a Vec, splice in the auth entries, then reassign.
+    let mut new_ops: Vec<Operation> = tx.operations.as_slice().iter().cloned().collect();
+    for (i, new_op) in new_ops.iter_mut().enumerate() {
+        if let Some(auth_entry) = auth_entries.get(i) {
+            if let OperationBody::InvokeHostFunction(invoke_op) = new_op.body.clone() {
+                let mut updated_invoke = invoke_op;
+                updated_invoke.auth = vec![auth_entry.clone()].try_into().unwrap();
+                new_op.body = OperationBody::InvokeHostFunction(updated_invoke);
             }
         }
     }
+    let tx = Transaction {
+        operations: new_ops.try_into().unwrap(),
+        ..tx
+    };
 
     let final_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
         tx,
         signatures: vec![].try_into().unwrap(),
     });
 
-    final_envelope.to_xdr_base64().map_err(|_| {
+    final_envelope.to_xdr_base64(Limits::none()).map_err(|_| {
         StellarAidError::TransactionFailed("Failed to encode final tx to base64".to_string())
     })
 }
@@ -130,14 +133,13 @@ fn build_donate_operations(
     let donor_address = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
         donor_pubkey,
     ))));
-    let contract_address = ScAddress::Contract(Hash(contract_id_bytes));
-    let token_address = ScAddress::Contract(Hash(token_id_bytes));
 
     let donate_op = build_donate_operation(
-        donor_address.clone(),
+        donor_address,
         campaign_id,
         token_id_bytes,
         amount,
+        memo,
         contract_id_bytes,
     );
 
@@ -242,7 +244,7 @@ pub fn build_custom_token_donate_transaction(
         }
     }
 
-    let seq_num = fetch_sequence_number(donor, network.horizon_url)
+    let seq_num = fetch_sequence_number(donor, &network.horizon_url)
         .map_err(|e| StellarAidError::NetworkError(format!("Failed to fetch sequence: {}", e)))?;
 
     let contract_id_str = std::env::var("DONATION_CONTRACT_ID")
@@ -266,6 +268,7 @@ pub fn build_custom_token_donate_transaction(
         campaign_id,
         token_id_bytes,
         amount,
+        memo,
         contract_id_bytes,
     );
 
@@ -286,36 +289,37 @@ pub fn build_custom_token_donate_transaction(
         signatures: vec![].try_into().unwrap(),
     });
 
-    let base64_tx = envelope.to_xdr_base64().map_err(|_| {
+    let base64_tx = envelope.to_xdr_base64(Limits::none()).map_err(|_| {
         StellarAidError::TransactionFailed("Failed to encode tx to base64".to_string())
     })?;
 
     let (min_fee, soroban_data, auth_entries) =
-        simulate_transaction(&base64_tx, network.soroban_rpc_url).map_err(|e| {
-            StellarAidError::SorobanError {
-                code: -1,
-                message: e,
-            }
-        })?;
+        simulate_transaction(&base64_tx, &network.soroban_rpc_url)?;
 
     tx.fee = min_fee as u32 + 100;
     tx.ext = TransactionExt::V1(soroban_data);
 
-    for (i, auth_entry) in auth_entries.iter().enumerate() {
-        if let Some(op) = tx.operations.get(i) {
-            if let OperationBody::InvokeHostFunction(mut invoke_op) = op.body.clone() {
+    // VecM<Operation> doesn't expose IndexMut in soroban-sdk 20.5.0, so clone
+    // each op into a Vec, splice in the auth entries, then reassign.
+    let mut new_ops: Vec<Operation> = tx.operations.as_slice().iter().cloned().collect();
+    for (i, new_op) in new_ops.iter_mut().enumerate() {
+        if let Some(auth_entry) = auth_entries.get(i) {
+            if let OperationBody::InvokeHostFunction(invoke_op) = &mut new_op.body {
                 invoke_op.auth = vec![auth_entry.clone()].try_into().unwrap();
-                tx.operations[i].body = OperationBody::InvokeHostFunction(invoke_op);
             }
         }
     }
+    let tx = Transaction {
+        operations: new_ops.try_into().unwrap(),
+        ..tx
+    };
 
     let final_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
         tx,
         signatures: vec![].try_into().unwrap(),
     });
 
-    final_envelope.to_xdr_base64().map_err(|_| {
+    final_envelope.to_xdr_base64(Limits::none()).map_err(|_| {
         StellarAidError::TransactionFailed("Failed to encode final tx to base64".to_string())
     })
 }
@@ -384,7 +388,7 @@ fn simulate_transaction(
         .as_str()
         .ok_or("Missing transactionData in simulation result")?;
 
-    let soroban_data = SorobanTransactionData::from_xdr_base64(transaction_data_b64)
+    let soroban_data = SorobanTransactionData::from_xdr_base64(transaction_data_b64, Limits::none())
         .map_err(|_| "Failed to parse transactionData XDR")?;
 
     let mut auth_entries = Vec::new();
@@ -393,9 +397,11 @@ fn simulate_transaction(
             if let Some(auth_array) = first_result.get("auth").and_then(|a| a.as_array()) {
                 for auth_val in auth_array {
                     if let Some(auth_b64) = auth_val.as_str() {
-                        let entry =
-                            soroban_sdk::xdr::SorobanAuthorizationEntry::from_xdr_base64(auth_b64)
-                                .map_err(|_| "Failed to parse auth entry XDR")?;
+                        let entry = soroban_sdk::xdr::SorobanAuthorizationEntry::from_xdr_base64(
+                            auth_b64,
+                            Limits::none(),
+                        )
+                        .map_err(|_| "Failed to parse auth entry XDR")?;
                         auth_entries.push(entry);
                     }
                 }

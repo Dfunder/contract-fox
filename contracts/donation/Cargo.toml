@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-testutils = ["soroban-sdk/testutils"]
+testutils = ["soroban-sdk/testutils", "contracts-shared/testutils"]
 
 [dependencies]
 soroban-sdk = "20.5.0"

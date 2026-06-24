@@ -159,7 +159,8 @@ impl DonationsRepo {
     /// found and updated to status `refunded`, `false` if no
     /// matching donation existed.
     pub fn mark_refunded(&self, tx_hash: &str) -> Result<bool, DbError> {
-        let updated = self.conn.execute(
+        let conn = self.lock();
+        let updated = conn.execute(
             "UPDATE donations SET status = 'refunded' WHERE tx_hash = ?1",
             params![tx_hash],
         )?;
@@ -371,7 +372,7 @@ mod tests {
         assert_eq!(a_refetch.status, "refunded");
         assert_eq!(b_refetch.status, "confirmed");
     }
-}
+
     /// The repo must be `Send + Sync` so it can live inside an `AppState`
     /// shared across axum worker tasks.
     #[test]
