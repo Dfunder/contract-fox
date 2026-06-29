@@ -4,4 +4,5 @@
 //! [`SorobanRpc`](crate::soroban::rpc_client::SorobanRpc) trait that the HTTP
 //! handlers depend on for testability.
 
+// Start
 pub mod rpc_client;

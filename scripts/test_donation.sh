@@ -8,7 +8,7 @@ source .contract_ids 2>/dev/null || {
   echo "Contract IDs not found. Run deploy_donation_example.sh first."
   exit 1
 }
-
+# Check if the contract IDs are set
 echo "Using Campaign Contract: $CAMPAIGN_CONTRACT_ID"
 echo "Using Donation Contract: $DONATION_CONTRACT_ID"
 

@@ -19,7 +19,7 @@ The campaign contract uses the following persistent keys:
 - `Campaign(<id>)`: campaign tuple `(id, owner, goal, deadline, status, created_at)`.
 - `Raised(<id>)`: total raised amount for the campaign.
 
-### TTL Bumping
+<!-- ### TTL Bumping
 
 Active campaigns are kept alive by extending TTL for the relevant persistent keys whenever the campaign is interacted with.
 
@@ -27,7 +27,7 @@ Active campaigns are kept alive by extending TTL for the relevant persistent key
 - When an active campaign is **read or updated**, the contract bumps TTL for `Campaign(<id>)` and `Raised(<id>)`.
 - When the campaign counter is read/updated, the contract bumps TTL for `CampaignCount`.
 
-The contract performs TTL extension via:
+The contract performs TTL extension via: -->
 
 `env.storage().persistent().extend_ttl(key, threshold, bump_to)`
 
@@ -41,10 +41,10 @@ Current parameters (see `contracts/campaign/src/lib.rs`):
 - `CAMPAIGN_TTL_THRESHOLD_LEDGERS = 7 days`
 - `CAMPAIGN_TTL_BUMP_TO_LEDGERS = 30 days`
 
-Networks may enforce a maximum TTL for persistent entries; the runtime clamps extensions to the network’s configured maximum.
+<!-- Networks may enforce a maximum TTL for persistent entries; the runtime clamps extensions to the network’s configured maximum.
 
 ### Temporary “Bump Lock”
 
 To reduce redundant TTL extension calls, `bump_campaign_ttl` writes a temporary key `CampaignTtlBumpLock(<id>)` containing the last ledger sequence where TTL was bumped. If the last bump is recent (within a small ledger window), the function skips extending TTL for that call.
 
-This key is stored in temporary storage so it naturally expires and does not become part of long-lived state.
+This key is stored in temporary storage so it naturally expires and does not become part of long-lived state. -->

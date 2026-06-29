@@ -8,7 +8,7 @@ This guide creates a Stellar custom asset (default: `AID`) with:
 The implementation for this flow lives in `src/setup/token_setup.rs`.
 
 ## Prerequisites
-
+<!-- 
 - `stellar` CLI installed and authenticated for testnet usage.
 - Network access to Stellar testnet services.
 
@@ -44,7 +44,7 @@ stellar tx new payment \
   --sign --submit
 ```
 
-## Expected outcome
+## Expected outcome -->
 
 After successful execution:
 
