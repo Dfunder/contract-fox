@@ -4,7 +4,7 @@ This document covers the steps required to deploy the Soroban smart contracts co
 in this workspace to the **testnet** or **mainnet** networks. It also provides
 examples of invoking deployed contracts using the `soroban` CLI.
 
----
+<!-- ---
 
 ## 1. Prerequisites
 
@@ -33,7 +33,7 @@ soroban network add mainnet \
     --network-passphrase "Public Global Stellar Network ; September 2015"
 
 # view available profiles
-soroban network ls
+soroban network ls -->
 
 # choose an active profile (or set SOROBAN_NETWORK environment variable)
 soroban network use testnet

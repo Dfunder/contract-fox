@@ -9,7 +9,7 @@ if ! command -v soroban >/dev/null 2>&1; then
     echo "Error: soroban CLI not found. Install it with 'cargo install soroban-cli' or 'npm install -g soroban-cli'." >&2
     exit 1
 fi
-
+# Set the network, defaulting to "testnet"
 NETWORK=${1:-testnet}
 
 # ensure profile exists (some soroban versions use "network" subcommand)

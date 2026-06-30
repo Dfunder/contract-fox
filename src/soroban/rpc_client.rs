@@ -118,10 +118,10 @@ pub struct TransactionStatusResponse {
 
 // ── Trait abstraction ──────────────────────────────────────────────────────────
 
-/// Async abstraction over a Soroban JSON-RPC endpoint.
-///
-/// The HTTP handlers depend on this trait so they can be unit-tested with a
-/// mock implementation instead of hitting the network.
+// Async abstraction over a Soroban JSON-RPC endpoint.
+//
+// The HTTP handlers depend on this trait so they can be unit-tested with a
+// mock implementation instead of hitting the network.
 #[async_trait::async_trait]
 pub trait SorobanRpc: Send + Sync {
     /// Submit a signed transaction to the network.
